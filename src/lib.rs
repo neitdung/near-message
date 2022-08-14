@@ -1,9 +1,12 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{UnorderedMap, LookupMap, UnorderedSet};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, BorshStorageKey, assert_one_yocto, json_types::U128 };
+use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};
 use email::*;
+use storage_impl::*;
 
 mod email;
+mod storage_impl;
 pub type EmailID = u128;
 
 #[derive(BorshStorageKey, BorshSerialize)]
@@ -12,7 +15,8 @@ pub enum StorageKeys {
     Receiver,
     Email,
     SenderMail { email_id : EmailID},
-    ReceiverMail { email_id : EmailID}
+    ReceiverMail { email_id : EmailID},
+    Account
 }
 
 #[near_bindgen]
@@ -22,6 +26,7 @@ pub struct Contract {
     receivers: LookupMap<AccountId, UnorderedSet<EmailID>>,
     emails: UnorderedMap<EmailID, Email>,
     email_count: u128,
+    accounts: LookupMap<AccountId, VAccount>
 }
 
 #[near_bindgen]
@@ -32,13 +37,21 @@ impl Contract {
             senders: LookupMap::new(StorageKeys::Sender),
             receivers: LookupMap::new(StorageKeys::Receiver),
             emails: UnorderedMap::new(StorageKeys::Email),
-            email_count: 0
+            email_count: 0,
+            accounts: LookupMap::new(StorageKeys::Account)
         }
     }
 
     #[payable]
     pub fn send_mail(&mut self, receiver: AccountId, title: String, content: String) {
         assert_one_yocto();
+        let sender = env::predecessor_account_id();
+        assert!(self.accounts.contains_key(&sender), "Account not registered");
+        assert!(self.can_send_mail(sender.clone()), "Not deposit enough");
+
+        let mut vaccount = self.accounts.get(&sender).unwrap();
+        vaccount.used += STORAGE_PER_MAIL * env::storage_byte_cost();
+        self.accounts.insert(&sender, &vaccount);
         let current_count = self.email_count;
         self.email_count = self.email_count +1;
         let timestamp =env::block_timestamp();
@@ -48,7 +61,6 @@ impl Contract {
             timestamp
         };
         self.emails.insert(&current_count, &email);
-        let sender = env::predecessor_account_id();
         if let Some(mut sender_vec) = self.senders.get(&sender) {
             sender_vec.insert(&current_count);
             self.senders.insert(&sender, &sender_vec);
@@ -123,5 +135,17 @@ impl Contract {
     pub fn mail_delete(&self) -> U128 {
         let mail_exist:u128 = self.emails.keys_as_vector().len().into();
         U128(self.email_count - mail_exist)
+    }
+}
+
+impl Contract {
+    pub fn can_send_mail(&self, account_id: AccountId) -> bool {
+        let available_storage = self.storage_balance_of(account_id.clone()).unwrap().available.0;
+
+        if let Some(sender) = self.senders.get(&account_id) {
+            let mail_len: u128 = (sender.len() +1).into();
+            return available_storage > (mail_len * STORAGE_PER_MAIL * env::storage_byte_cost());
+        }
+        return available_storage > (STORAGE_PER_MAIL * env::storage_byte_cost());
     }
 }

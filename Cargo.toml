@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = "4.0.0"
-
+near-contract-standards = "4.0.0"
 [profile.release]
 codegen-units = 1
 # Tell `rustc` to optimize for small code size.
