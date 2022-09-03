@@ -1,12 +1,14 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{UnorderedMap, LookupMap, UnorderedSet};
-use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, BorshStorageKey, assert_one_yocto, json_types::U128 };
+use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, BorshStorageKey, json_types::U128, Promise };
 use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};
 use email::*;
 use storage_impl::*;
+use legacy::*;
 
 mod email;
 mod storage_impl;
+mod legacy;
 pub type EmailID = u128;
 
 #[derive(BorshStorageKey, BorshSerialize)]
@@ -22,11 +24,13 @@ pub enum StorageKeys {
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
-    senders: LookupMap<AccountId, UnorderedSet<EmailID>>,
-    receivers: LookupMap<AccountId, UnorderedSet<EmailID>>,
-    emails: UnorderedMap<EmailID, Email>,
-    email_count: u128,
-    accounts: LookupMap<AccountId, VAccount>
+    pub senders: LookupMap<AccountId, UnorderedSet<EmailID>>,
+    pub receivers: LookupMap<AccountId, UnorderedSet<EmailID>>,
+    pub emails: UnorderedMap<EmailID, UpgradeableEmail>,
+    pub email_count: u128,
+    pub accounts: LookupMap<AccountId, VAccount>,
+    pub donation_count: u128,
+    pub donation_account: AccountId
 }
 
 #[near_bindgen]
@@ -38,13 +42,29 @@ impl Contract {
             receivers: LookupMap::new(StorageKeys::Receiver),
             emails: UnorderedMap::new(StorageKeys::Email),
             email_count: 0,
-            accounts: LookupMap::new(StorageKeys::Account)
+            accounts: LookupMap::new(StorageKeys::Account),
+            donation_count: 0,
+            donation_account: AccountId::new_unchecked("dev-1662036494830-25321560561944".to_string())
+        }
+    }
+
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let contract_v1: ContractV1 = env::state_read().expect("Cannot read state");
+        Contract { 
+            senders: contract_v1.senders,
+            receivers: contract_v1.receivers,
+            emails: contract_v1.emails,
+            email_count: contract_v1.email_count,
+            accounts: contract_v1.accounts,
+            donation_count: 0,
+            donation_account: AccountId::new_unchecked("dev-1662036494830-25321560561944".to_string())
         }
     }
 
     #[payable]
-    pub fn send_mail(&mut self, receiver: AccountId, title: String, content: String) {
-        assert_one_yocto();
+    pub fn send_mail(&mut self, receiver: AccountId, title: String, content: String) -> Promise {
         let sender = env::predecessor_account_id();
         assert!(self.accounts.contains_key(&sender), "Account not registered");
         assert!(self.can_send_mail(sender.clone()), "Not deposit enough");
@@ -55,12 +75,15 @@ impl Contract {
         let current_count = self.email_count;
         self.email_count = self.email_count +1;
         let timestamp =env::block_timestamp();
+        let fee = U128(env::attached_deposit());
         let email = Email {
             title,
             content,
-            timestamp
+            timestamp,
+            fee
         };
-        self.emails.insert(&current_count, &email);
+        let upgradeable_email = UpgradeableEmail::from(email);
+        self.emails.insert(&current_count, &upgradeable_email);
         if let Some(mut sender_vec) = self.senders.get(&sender) {
             sender_vec.insert(&current_count);
             self.senders.insert(&sender, &sender_vec);
@@ -78,11 +101,12 @@ impl Contract {
             receiver_vec_new.insert(&current_count);
             self.receivers.insert(&receiver, &receiver_vec_new);
         }
+        Promise::new(receiver).transfer(fee.0)
     }
 
     pub fn get_email(&self, email_id: U128) -> Email {
         let real_email_id: EmailID = email_id.0;
-        self.emails.get(&real_email_id).unwrap()
+        self.emails.get(&real_email_id).unwrap().into_current()
     }
 
     pub fn delete_mail(&mut self, email_id: U128) {
@@ -100,7 +124,7 @@ impl Contract {
         let mut email_vec:Vec<Email> = Vec::new();
         if let Some(receiver_vec) = self.receivers.get(&receiver) {
             for index in receiver_vec.iter() {
-                let mail = self.emails.get(&index).unwrap();
+                let mail = self.emails.get(&index).unwrap().into_current();
                 email_vec.push(mail);
             }
         }
@@ -111,7 +135,7 @@ impl Contract {
         let mut email_vec:Vec<Email> = Vec::new();
         if let Some(sender_vec) = self.senders.get(&sender) {
             for index in sender_vec.iter() {
-                let mail = self.emails.get(&index).unwrap();
+                let mail = self.emails.get(&index).unwrap().into_current();
                 email_vec.push(mail);
             }
         }
